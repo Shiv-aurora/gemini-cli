@@ -28,6 +28,7 @@ import {
 import { debugLogger } from '../utils/debugLogger.js';
 
 const TOOL_CALL_LOOP_THRESHOLD = 5;
+const MAX_TOOL_CYCLE_LENGTH = 4;
 const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
 const MAX_HISTORY_LENGTH = 5000;
@@ -102,9 +103,8 @@ export class LoopDetectionService {
   private readonly config: Config;
   private promptId = '';
 
-  // Tool call tracking
-  private lastToolCallKey: string | null = null;
-  private toolCallRepetitionCount: number = 0;
+  // Tool call tracking (sliding window for cycle detection)
+  private toolCallHistory: string[] = [];
 
   // Content streaming tracking
   private streamContentHistory = '';
@@ -201,22 +201,44 @@ export class LoopDetectionService {
 
   private checkToolCallLoop(toolCall: { name: string; args: object }): boolean {
     const key = this.getToolCallKey(toolCall);
-    if (this.lastToolCallKey === key) {
-      this.toolCallRepetitionCount++;
-    } else {
-      this.lastToolCallKey = key;
-      this.toolCallRepetitionCount = 1;
+    this.toolCallHistory.push(key);
+
+    // Keep history bounded to the largest window we'd ever need
+    const maxNeeded = MAX_TOOL_CYCLE_LENGTH * TOOL_CALL_LOOP_THRESHOLD;
+    if (this.toolCallHistory.length > maxNeeded) {
+      this.toolCallHistory = this.toolCallHistory.slice(-maxNeeded);
     }
-    if (this.toolCallRepetitionCount >= TOOL_CALL_LOOP_THRESHOLD) {
-      logLoopDetected(
-        this.config,
-        new LoopDetectedEvent(
-          LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
-          this.promptId,
-        ),
-      );
-      return true;
+
+    // Check for repeating cycles of length 1 … MAX_TOOL_CYCLE_LENGTH
+    for (let cycleLen = 1; cycleLen <= MAX_TOOL_CYCLE_LENGTH; cycleLen++) {
+      const needed = cycleLen * TOOL_CALL_LOOP_THRESHOLD;
+      if (this.toolCallHistory.length < needed) {
+        continue;
+      }
+
+      const recent = this.toolCallHistory.slice(-needed);
+      const pattern = recent.slice(0, cycleLen);
+      let isCycle = true;
+      for (let i = 0; i < needed; i++) {
+        if (recent[i] !== pattern[i % cycleLen]) {
+          isCycle = false;
+          break;
+        }
+      }
+
+      if (isCycle) {
+        const loopType =
+          cycleLen === 1
+            ? LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS
+            : LoopType.CYCLIC_TOOL_CALL_PATTERN;
+        logLoopDetected(
+          this.config,
+          new LoopDetectedEvent(loopType, this.promptId),
+        );
+        return true;
+      }
     }
+
     return false;
   }
 
@@ -611,8 +633,7 @@ export class LoopDetectionService {
   }
 
   private resetToolCallCount(): void {
-    this.lastToolCallKey = null;
-    this.toolCallRepetitionCount = 0;
+    this.toolCallHistory = [];
   }
 
   private resetContentTracking(resetHistory = true): void {
