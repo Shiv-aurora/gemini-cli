@@ -174,6 +174,153 @@ describe('LoopDetectionService', () => {
     });
   });
 
+  describe('Cyclic Tool Call Loop Detection', () => {
+    it('should detect a 2-tool alternating pattern (A, B, A, B, ...)', () => {
+      const eventA = createToolCallRequestEvent('toolA', { x: 1 });
+      const eventB = createToolCallRequestEvent('toolB', { y: 2 });
+
+      const needed = 2 * TOOL_CALL_LOOP_THRESHOLD;
+      let detected = false;
+      for (let i = 0; i < needed; i++) {
+        detected = service.addAndCheck(i % 2 === 0 ? eventA : eventB);
+        if (detected) break;
+      }
+
+      expect(detected).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: LoopType.CYCLIC_TOOL_CALL_PATTERN,
+        }),
+      );
+    });
+
+    it('should detect a 3-tool cyclic pattern (A, B, C, A, B, C, ...)', () => {
+      const eventA = createToolCallRequestEvent('toolA', { x: 1 });
+      const eventB = createToolCallRequestEvent('toolB', { y: 2 });
+      const eventC = createToolCallRequestEvent('toolC', { z: 3 });
+      const cycle = [eventA, eventB, eventC];
+
+      const needed = 3 * TOOL_CALL_LOOP_THRESHOLD;
+      let detected = false;
+      for (let i = 0; i < needed; i++) {
+        detected = service.addAndCheck(cycle[i % 3]);
+        if (detected) break;
+      }
+
+      expect(detected).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: LoopType.CYCLIC_TOOL_CALL_PATTERN,
+        }),
+      );
+    });
+
+    it('should detect a 4-tool cyclic pattern', () => {
+      const events = [
+        createToolCallRequestEvent('t1', { a: 1 }),
+        createToolCallRequestEvent('t2', { b: 2 }),
+        createToolCallRequestEvent('t3', { c: 3 }),
+        createToolCallRequestEvent('t4', { d: 4 }),
+      ];
+
+      const needed = 4 * TOOL_CALL_LOOP_THRESHOLD;
+      let detected = false;
+      for (let i = 0; i < needed; i++) {
+        detected = service.addAndCheck(events[i % 4]);
+        if (detected) break;
+      }
+
+      expect(detected).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: LoopType.CYCLIC_TOOL_CALL_PATTERN,
+        }),
+      );
+    });
+
+    it('should not detect a cycle below the repetition threshold', () => {
+      const eventA = createToolCallRequestEvent('toolA', { x: 1 });
+      const eventB = createToolCallRequestEvent('toolB', { y: 2 });
+
+      // One repetition short: (TOOL_CALL_LOOP_THRESHOLD - 1) * 2 calls
+      const count = (TOOL_CALL_LOOP_THRESHOLD - 1) * 2;
+      for (let i = 0; i < count; i++) {
+        expect(service.addAndCheck(i % 2 === 0 ? eventA : eventB)).toBe(false);
+      }
+
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('should not false-positive on genuinely different sequences', () => {
+      // 20 unique tool calls in a row — no cycle
+      for (let i = 0; i < 20; i++) {
+        expect(
+          service.addAndCheck(
+            createToolCallRequestEvent(`tool_${i}`, { idx: i }),
+          ),
+        ).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('should detect a cycle that starts after non-repeating calls', () => {
+      // 5 unique calls, then an alternating cycle
+      for (let i = 0; i < 5; i++) {
+        service.addAndCheck(
+          createToolCallRequestEvent(`unique_${i}`, { idx: i }),
+        );
+      }
+
+      const eventA = createToolCallRequestEvent('loopA', { x: 1 });
+      const eventB = createToolCallRequestEvent('loopB', { y: 2 });
+
+      const needed = 2 * TOOL_CALL_LOOP_THRESHOLD;
+      let detected = false;
+      for (let i = 0; i < needed; i++) {
+        detected = service.addAndCheck(i % 2 === 0 ? eventA : eventB);
+        if (detected) break;
+      }
+
+      expect(detected).toBe(true);
+    });
+
+    it('should still use CONSECUTIVE_IDENTICAL_TOOL_CALLS type for cycle length 1', () => {
+      const event = createToolCallRequestEvent('testTool', { param: 'value' });
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+        service.addAndCheck(event);
+      }
+
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+        }),
+      );
+    });
+
+    it('should reset cycle tracking on reset()', () => {
+      const eventA = createToolCallRequestEvent('toolA', { x: 1 });
+      const eventB = createToolCallRequestEvent('toolB', { y: 2 });
+
+      // Get close to threshold
+      const almostThere = (TOOL_CALL_LOOP_THRESHOLD - 1) * 2;
+      for (let i = 0; i < almostThere; i++) {
+        service.addAndCheck(i % 2 === 0 ? eventA : eventB);
+      }
+
+      service.reset('new-prompt');
+
+      // After reset, the same alternation should not trigger
+      for (let i = 0; i < almostThere; i++) {
+        expect(service.addAndCheck(i % 2 === 0 ? eventA : eventB)).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+  });
+
   describe('Content Loop Detection', () => {
     const generateRandomString = (length: number) => {
       let result = '';
